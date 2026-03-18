@@ -52,7 +52,7 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let ticket = match EndpointTicket::from_str(
-                    "endpointaalojw2f2o37vs7pzkynsdt2xjgdpvh2l6iyfhubrrri7zjpt5smyaiaf5uhi5dqom5c6l3von3tcljrfzzgk3dbpexg4mbonfzg62bnmnqw4ylspexgs4tpnaxgy2lonmxc6",
+                    "endpointacpmyz2js7veawlqdag5udh3t2evk2w2jiy4xycmuodlyyjhrmwkyaiaf5uhi5dqom5c6l3von3tcljrfzzgk3dbpexg4mbonfzg62bnmnqw4ylspexgs4tpnaxgy2lonmxc6",
                 ) {
                     Ok(t) => t,
                     Err(e) => {
@@ -189,14 +189,23 @@ pub fn run() {
                         };
 
                         // 构建响应
-                        let mut http_response_builder = http::Response::builder().status(status);
+                        let mut http_response_builder = http::Response::builder()
+                            .status(status)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+                            .header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
                         // 先检查是否有Content-Range头
                         let has_content_range = headers.contains_key(http::header::CONTENT_RANGE);
 
                         // 遍历并添加所有头部
                         for (key, value) in &headers {
-                            http_response_builder = http_response_builder.header(key, value.to_owned());
+                            // 跳过 CORS 相关的头，使用我们自己设置的
+                            if key != &http::header::ACCESS_CONTROL_ALLOW_ORIGIN &&
+                               key != &http::header::ACCESS_CONTROL_ALLOW_METHODS &&
+                               key != &http::header::ACCESS_CONTROL_ALLOW_HEADERS {
+                                http_response_builder = http_response_builder.header(key, value.to_owned());
+                            }
                         }
 
                         // 处理Range请求和部分内容响应
@@ -248,6 +257,9 @@ pub fn run() {
                         // 发送错误响应
                         let error_response = http::Response::builder()
                             .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+                            .header("Access-Control-Allow-Headers", "Content-Type, Authorization")
                             .body(format!("Failed to send request: {}", e).as_bytes().to_vec())
                             .unwrap();
                         responder.respond(error_response);

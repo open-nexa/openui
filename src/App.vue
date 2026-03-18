@@ -84,10 +84,15 @@ async function testHttpViaP2p() {
 }
 
 async function testDirectHttp() {
-   fetch(testUrl.value)
-   .then(res => res.json())
-   .then(json => testResult.value = JSON.stringify(json, null, 2))
-   .catch(err => testResult.value = "Error: " + err);
+  console.log("test ", testUrl.value);
+  try {
+    const res = await fetch(testUrl.value);
+    const json = await res.json();
+    testResult.value = JSON.stringify(json, null, 2);
+  } catch (err) {
+    console.error("Failed to make direct request:", err);
+    testResult.value = "Error: " + err;
+  }
 }
 
 async function copyTicket() {
