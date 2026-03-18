@@ -52,7 +52,7 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let ticket = match EndpointTicket::from_str(
-                    "endpointacpmyz2js7veawlqdag5udh3t2evk2w2jiy4xycmuodlyyjhrmwkyaiaf5uhi5dqom5c6l3von3tcljrfzzgk3dbpexg4mbonfzg62bnmnqw4ylspexgs4tpnaxgy2lonmxc6",
+                    "endpointaamzhrv6n3etssh3gbjfw4sbddsrbqrzzoqsj6wpnv4vdepgo26foaiaf5uhi5dqom5c6l3von3tcljrfzzgk3dbpexg4mbonfzg62bnmnqw4ylspexgs4tpnaxgy2lonmxc6",
                 ) {
                     Ok(t) => t,
                     Err(e) => {
