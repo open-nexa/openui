@@ -62,36 +62,47 @@ pub fn run() {
                 };
 
                 // 尝试获取现有连接，如果没有则建立新连接
-                let (mut send, recv) = if let Some(conn) = connection_store.get_connection() {
-                    // 这里我们直接建立新连接，因为类型转换存在问题
-                    // 实际项目中，你需要根据 iroh 的 API 文档来正确处理连接类型
-                    // 这里只是一个示例，展示如何在 setup 中提前建立连接
-                    match endpoint.connect(ticket.clone(), &nexapipe::ALPN.to_vec()).await {
-                        Ok(new_conn) => {
-                            new_conn.open_bi().await.unwrap()
-                        },
-                        Err(e) => {
-                            eprintln!("Failed to connect: {}", e);
-                            return;
+                let (mut send, recv) = match endpoint.connect(ticket.clone(), &nexapipe::ALPN.to_vec()).await {
+                    Ok(conn) => {
+                        // 存储连接
+                        let conn_arc = Arc::new(conn);
+                        connection_store.set_connection(conn_arc.clone());
+                        // 打开 bi-stream
+                        match conn_arc.open_bi().await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                eprintln!("Failed to open bi-stream: {}", e);
+                                // 发送错误响应
+                                let error_response = http::Response::builder()
+                                    .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(format!("Failed to open bi-stream: {}", e).as_bytes().to_vec())
+                                    .unwrap();
+                                responder.respond(error_response);
+                                connection_store.reset_connection();
+                                return;
+                            }
                         }
-                    }
-                } else {
-                    // 建立新连接
-                    match endpoint.connect(ticket.clone(), &nexapipe::ALPN.to_vec()).await {
-                        Ok(conn) => {
-                            let conn_arc = Arc::new(conn);
-                            connection_store.set_connection(conn_arc.clone());
-                            conn_arc.open_bi().await.unwrap()
-                        },
-                        Err(e) => {
-                            eprintln!("Failed to connect: {}", e);
-                            return;
-                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to connect: {}", e);
+                        // 发送错误响应
+                        let error_response = http::Response::builder()
+                            .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(format!("Failed to connect: {}", e).as_bytes().to_vec())
+                            .unwrap();
+                        responder.respond(error_response);
+                        return;
                     }
                 };
                 let send_result = send.write_all(&nexapipe::HANDSHAKE).await;
                 if let Err(e) = send_result {
                     eprintln!("Failed to send handshake: {}", e);
+                    // 发送错误响应
+                    let error_response = http::Response::builder()
+                        .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(format!("Failed to send handshake: {}", e).as_bytes().to_vec())
+                        .unwrap();
+                    responder.respond(error_response);
                     // 重置连接，下次请求会重新建立
                     connection_store.reset_connection();
                     return;
@@ -107,6 +118,12 @@ pub fn run() {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("Handshake failed: {}", e);
+                        // 发送错误响应
+                        let error_response = http::Response::builder()
+                            .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(format!("Handshake failed: {}", e).as_bytes().to_vec())
+                            .unwrap();
+                        responder.respond(error_response);
                         // 重置连接，下次请求会重新建立
                         connection_store.reset_connection();
                         return;
@@ -130,6 +147,12 @@ pub fn run() {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("Failed to build request: {}", e);
+                        // 发送错误响应
+                        let error_response = http::Response::builder()
+                            .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(format!("Failed to build request: {}", e).as_bytes().to_vec())
+                            .unwrap();
+                        responder.respond(error_response);
                         return;
                     }
                 };
@@ -148,27 +171,86 @@ pub fn run() {
                 println!("Request: {:?}", req);
 
                 match sender.send_request(req).await {
-                    Ok(resp) => {
-                        eprintln!("Response: {:?}", resp);
-                        let status = resp.status();
-                        let body = resp.into_body();
-                        let body_bytes = match body.collect().await {
-                            Ok(c) => c.to_bytes().to_vec(),
-                            Err(e) => {
-                                eprintln!("Failed to collect response body: {}", e);
+                    Ok(response) => {
+                        let status = response.status();
+                        let headers = response.headers().clone();
+ 
+                        // 读取响应体
+                        let body = match http_body_util::BodyExt::collect(response.into_body()).await {
+                            Ok(body) => body.to_bytes().to_vec(),
+                            Err(_) => {
+                                let response = http::Response::builder()
+                                    .status(500)
+                                    .body(std::borrow::Cow::Borrowed(&[] as &[u8]))
+                                    .unwrap();
+                                responder.respond(response);
                                 return;
                             }
                         };
-                        
-                        eprintln!("Response body: {:?}", String::from_utf8_lossy(&body_bytes));
-                        let response = http::Response::builder()
-                            .status(status) 
-                            .body(body_bytes)
-                            .unwrap();
-                        responder.respond(response);
+
+                        // 构建响应
+                        let mut http_response_builder = http::Response::builder().status(status);
+
+                        // 先检查是否有Content-Range头
+                        let has_content_range = headers.contains_key(http::header::CONTENT_RANGE);
+
+                        // 遍历并添加所有头部
+                        for (key, value) in &headers {
+                            http_response_builder = http_response_builder.header(key, value.to_owned());
+                        }
+
+                        // 处理Range请求和部分内容响应
+                        if status == http::StatusCode::PARTIAL_CONTENT {
+                            // 确保Content-Range头存在
+                            if has_content_range {
+                                // 返回部分内容响应
+                                if let Ok(resp) = http_response_builder.body(std::borrow::Cow::Owned(body)) {
+                                    responder.respond(resp);
+                                } else {
+                                    let response = http::Response::builder()
+                                        .status(status)
+                                        .body(std::borrow::Cow::Borrowed(&[] as &[u8]))
+                                        .unwrap();
+                                    responder.respond(response);
+                                }
+                            } else {
+                                // 如果没有Content-Range头，返回完整内容
+                                let mut full_response_builder =
+                                    http::Response::builder().status(http::StatusCode::OK);
+                                for (key, value) in &headers {
+                                    full_response_builder = full_response_builder.header(key, value.to_owned());
+                                }
+                                if let Ok(resp) = full_response_builder.body(std::borrow::Cow::Owned(body)) {
+                                    responder.respond(resp);
+                                } else {
+                                    let response = http::Response::builder()
+                                        .status(http::StatusCode::OK)
+                                        .body(std::borrow::Cow::Borrowed(&[] as &[u8]))
+                                        .unwrap();
+                                    responder.respond(response);
+                                }
+                            }
+                        } else {
+                            // 返回完整内容响应
+                            if let Ok(resp) = http_response_builder.body(std::borrow::Cow::Owned(body)) {
+                                responder.respond(resp);
+                            } else {
+                                let response = http::Response::builder()
+                                    .status(status)
+                                    .body(std::borrow::Cow::Borrowed(&[] as &[u8]))
+                                    .unwrap();
+                                responder.respond(response);
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("Failed to send request: {}", e);
+                        // 发送错误响应
+                        let error_response = http::Response::builder()
+                            .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(format!("Failed to send request: {}", e).as_bytes().to_vec())
+                            .unwrap();
+                        responder.respond(error_response);
                         // 重置连接，下次请求会重新建立
                         connection_store.reset_connection();
                     }
