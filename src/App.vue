@@ -85,6 +85,9 @@ async function testHttpViaP2p() {
 
 async function testDirectHttp() {
    fetch(testUrl.value)
+   .then(res => res.json())
+   .then(json => testResult.value = JSON.stringify(json, null, 2))
+   .catch(err => testResult.value = "Error: " + err);
 }
 
 async function copyTicket() {

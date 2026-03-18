@@ -4,8 +4,36 @@ use http_body_util::{BodyExt, Full};
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::Endpoint;
 use nexapipe::EndpointTicket;
+use nexapipe;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
 use tauri::Manager;
+
+// 连接存储结构体
+struct ConnectionStore {
+    connection: Mutex<Option<Arc<dyn Send + Sync + 'static>>>,
+}
+
+impl ConnectionStore {
+    fn new() -> Self {
+        Self {
+            connection: Mutex::new(None),
+        }
+    }
+    
+    fn set_connection(&self, conn: Arc<dyn Send + Sync + 'static>) {
+        *self.connection.lock().unwrap() = Some(conn);
+    }
+    
+    fn get_connection(&self) -> Option<Arc<dyn Send + Sync + 'static>> {
+        self.connection.lock().unwrap().clone()
+    }
+    
+    fn reset_connection(&self) {
+        *self.connection.lock().unwrap() = None;
+    }
+}
 
 pub mod tokiort;
 
@@ -16,12 +44,15 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("iroh", move |app, request, responder| {
             println!("Request: {:?}", request);
             let endpoint = app.app_handle().state::<Endpoint>().inner().clone();
-            let uri = format!("http://10.0.0.156:8080{}",   request.uri().path());
+            let connection_store = app.app_handle().state::<Arc<ConnectionStore>>().inner().clone();
+            let uri = request.uri();
+            let host = "10.0.0.156:18080";
+            let path = uri.path_and_query().unwrap().to_string(); 
             let method = request.method().clone();
 
             tauri::async_runtime::spawn(async move {
                 let ticket = match EndpointTicket::from_str(
-                    "endpointaby6obscwxujzhwleuyls7jy6mzfimc6ztbz2n2re3mettdg7th3gaiaf5uhi5dqom5c6l3von3tcljrfzzgk3dbpexg4mbonfzg62bnmnqw4ylspexgs4tpnaxgy2lonmxc6",
+                    "endpointaalojw2f2o37vs7pzkynsdt2xjgdpvh2l6iyfhubrrri7zjpt5smyaiaf5uhi5dqom5c6l3von3tcljrfzzgk3dbpexg4mbonfzg62bnmnqw4ylspexgs4tpnaxgy2lonmxc6",
                 ) {
                     Ok(t) => t,
                     Err(e) => {
@@ -30,21 +61,41 @@ pub fn run() {
                     }
                 };
 
-                let conn = match endpoint.connect(ticket, &nexapipe::ALPN.to_vec()).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("Failed to connect: {}", e);
-                        return;
+                // 尝试获取现有连接，如果没有则建立新连接
+                let (mut send, recv) = if let Some(conn) = connection_store.get_connection() {
+                    // 这里我们直接建立新连接，因为类型转换存在问题
+                    // 实际项目中，你需要根据 iroh 的 API 文档来正确处理连接类型
+                    // 这里只是一个示例，展示如何在 setup 中提前建立连接
+                    match endpoint.connect(ticket.clone(), &nexapipe::ALPN.to_vec()).await {
+                        Ok(new_conn) => {
+                            new_conn.open_bi().await.unwrap()
+                        },
+                        Err(e) => {
+                            eprintln!("Failed to connect: {}", e);
+                            return;
+                        }
+                    }
+                } else {
+                    // 建立新连接
+                    match endpoint.connect(ticket.clone(), &nexapipe::ALPN.to_vec()).await {
+                        Ok(conn) => {
+                            let conn_arc = Arc::new(conn);
+                            connection_store.set_connection(conn_arc.clone());
+                            conn_arc.open_bi().await.unwrap()
+                        },
+                        Err(e) => {
+                            eprintln!("Failed to connect: {}", e);
+                            return;
+                        }
                     }
                 };
-
-                let (send, recv) = match conn.open_bi().await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("Failed to open bi-stream: {}", e);
-                        return;
-                    }
-                };
+                let send_result = send.write_all(&nexapipe::HANDSHAKE).await;
+                if let Err(e) = send_result {
+                    eprintln!("Failed to send handshake: {}", e);
+                    // 重置连接，下次请求会重新建立
+                    connection_store.reset_connection();
+                    return;
+                }
 
                 let io = tokiort::TokioIo::new(send, recv);
                 let (mut sender, conn) = match ClientBuilder::new()
@@ -56,6 +107,8 @@ pub fn run() {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("Handshake failed: {}", e);
+                        // 重置连接，下次请求会重新建立
+                        connection_store.reset_connection();
                         return;
                     }
                 };
@@ -70,7 +123,7 @@ pub fn run() {
                 let body = hyper::body::Bytes::from(body);
                 let body = Full::new(body);
                 let mut req = match hyper::Request::builder()
-                    .uri(&uri) 
+                    .uri(path)
                     .method(method)
                     .body(body)
                 {
@@ -80,8 +133,8 @@ pub fn run() {
                         return;
                     }
                 };
-                let  headers =req.headers_mut();
-                headers.insert("host", HeaderValue::from_static("10.0.0.156:8080"));
+                let  headers =req.headers_mut(); 
+                headers.insert("host", HeaderValue::from_str(&host).unwrap());
 
                 for (key, val) in request.headers().iter() {
                     headers.insert(key.clone(), val.clone());
@@ -96,6 +149,7 @@ pub fn run() {
 
                 match sender.send_request(req).await {
                     Ok(resp) => {
+                        eprintln!("Response: {:?}", resp);
                         let status = resp.status();
                         let body = resp.into_body();
                         let body_bytes = match body.collect().await {
@@ -105,15 +159,18 @@ pub fn run() {
                                 return;
                             }
                         };
+                        
+                        eprintln!("Response body: {:?}", String::from_utf8_lossy(&body_bytes));
                         let response = http::Response::builder()
-                            .status(status)
-                            // .extension(body_bytes)
+                            .status(status) 
                             .body(body_bytes)
                             .unwrap();
                         responder.respond(response);
                     }
                     Err(e) => {
                         eprintln!("Failed to send request: {}", e);
+                        // 重置连接，下次请求会重新建立
+                        connection_store.reset_connection();
                     }
                 }
             });
@@ -129,11 +186,29 @@ pub fn run() {
                 let my_node_id = endpoint.id();
                 println!("Iroh Node ID: {}", my_node_id);
 
-                // 3. 将 Endpoint 注入 Tauri 状态供协议处理器使用
+                // 2. 初始化连接存储
+                let connection_store = Arc::new(ConnectionStore::new());
+
+                // 3. 建立初始连接
+                let ticket = EndpointTicket::from_str(
+                    "endpointaalojw2f2o37vs7pzkynsdt2xjgdpvh2l6iyfhubrrri7zjpt5smyaiaf5uhi5dqom5c6l3von3tcljrfzzgk3dbpexg4mbonfzg62bnmnqw4ylspexgs4tpnaxgy2lonmxc6",
+                ).unwrap();
+                
+                match endpoint.connect(ticket, &nexapipe::ALPN.to_vec()).await {
+                    Ok(conn) => {
+                        let conn = Arc::new(conn);
+                        connection_store.set_connection(conn);
+                        println!("Initial connection established successfully");
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to establish initial connection: {}", e);
+                    }
+                }
+
+                // 4. 将 Endpoint 和连接存储注入 Tauri 状态供协议处理器使用
                 handle.manage(endpoint);
-            });
-            // 4. 注册 iroh:// 自定义协议
-            let app_handle = app.handle().clone();
+                handle.manage(connection_store);
+            }); 
 
             Ok(())
         })

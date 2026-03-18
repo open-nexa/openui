@@ -3804,6 +3804,7 @@ dependencies = [
  "iroh-tickets",
  "mime_guess",
  "nexapipe",
+ "once_cell",
  "pin-project-lite",
  "reqwest 0.12.28",
  "serde",
